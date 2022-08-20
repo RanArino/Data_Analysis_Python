@@ -1,0 +1,236 @@
+import numpy as np
+import pandas as pd
+import xlwings as xw
+import datetime
+from dateutil.relativedelta import relativedelta
+import yfinance as yf
+import os
+import time
+import random
+
+from selenium import webdriver
+from selenium.webdriver.chrome.options import Options
+from webdriver_manager.chrome import ChromeDriverManager
+from selenium.webdriver.common.by import By
+from selenium.webdriver.common.keys import Keys
+import chromedriver_binary
+options = Options()
+options.add_argument('--disable-extensions');
+options.add_argument('--proxy-server="direct://"');
+options.add_argument('--proxy-bypass-list=*');
+options.add_argument('--start-maximized');
+
+def YAHOO_FINANCE_EXTRACT(file_name:str, tickers:list, daily_change: str, volumes:list, columns:list):
+    """
+    (str, list, str, list, list) -> edit excel file
+    Extract the data from yahoo finance and add them into excel file
+    """
+    file_list = os.listdir('data')
+    if file_name not in file_list:
+        return f'Error. There is no {file_name} in data'
+    
+    df = pd.DataFrame()
+    file_path = f'data/{file_name}'
+    excel_book = xw.Book(fullname=file_path)
+    for i in range(len(tickers)):
+        sheet = excel_book.sheets[tickers[i]]
+        last_row = int(sheet.range('A1').end('down').row)
+        last_date = sheet.range(f'A{last_row}').value
+        if pd.Timestamp(last_date) == pd.Timestamp(datetime.date.today()):
+            sheet.range(f'{last_row}:{last_row}').clear()
+            last_row = int(sheet.range('A1').end('down').row)
+
+        start_date = sheet.range(f'A{last_row}').value + datetime.timedelta(days=1)
+        new_data = yf.download(tickers[i], start=start_date).reset_index()[columns] # Data:'Open, High, Low, Close'
+        
+        if daily_change != None:
+            close_data = pd.DataFrame([sheet.range(f'{daily_change}{last_row}').value]).append(list(new_data['Close']))
+            close_func = lambda x: ((x.iloc[1]-x.iloc[0])/x.iloc[0])*100
+            new_data['Change%'] = close_data.rolling(window=2).apply(close_func).round(2).dropna().values # Data:'Change%'
+    
+        if volumes != None:
+            new_volume = yf.download(volumes[i], start=start_date).reset_index()[['Date', 'Volume']]
+            new_data = pd.merge(new_data, new_volume, on='Date', how='left') # Data: 'Volume'
+            
+        cell_num = last_row+1
+        for each_data in new_data.values:
+            sheet.range(f'A{cell_num}').value = each_data # Colume 'Open', 'High', 'Low', 'Close', 'Change%', 'Volume'
+            cell_num += 1
+        
+        new_data['Ticker'] = tickers[i] 
+        df = pd.concat([df, new_data])
+            
+    excel_book.save()
+    print('Added data:')
+    return df.reset_index().set_index(['Ticker', 'Date']).drop(['index'], axis=1)
+
+
+def SP500_SECTOR():
+    sectors = {'CONS_DESC': '^SP500-25', 'CONS_STPL': '^SP500-30', 'ENERGY': '^SP500-1010',
+               'FINANCIALS': '^SP500-40', 'HEALTH': '^SP500-35', 'INDUSTRIALS': '^SP500-20',
+               'MATERIALS': '^SP500-15', 'REAL_ESTATE': '^SP500-60', 'TECHNOLOGY': '^SP500-45',
+               'TELECOM_SVS': '^SP500-50', 'UTILITIES': '^SP500-55'}
+    book = xw.Book('data/US_Major_Indexes.xlsx')
+    sheet = book.sheets['S&P500_SECTOR']
+    last_row = int(sheet.range('A1').end('down').row)
+    last_day = sheet.range(f'A{last_row}').value.date()
+    if datetime.date.today() == last_day:
+        sheet.range(f'{last_row}:{last_row}').clear()
+        last_row = last_row - 1 # 7305
+    
+    start_day = sheet.range(f'A{last_row}').value.date() + datetime.timedelta(days=1)
+    prices = [yf.download(sectors[sector], start=start_day)["Close"].rename(sector) for sector in sectors]
+    df_sector = pd.concat(prices, axis=1).reset_index().round(2)
+    sheet.range(f'A{last_row+1}').value = df_sector.values
+    book.save()
+    print('Added data')
+    return df_sector
+            
+            
+def GET_PCR():
+    """
+    Extract Total, Index, and Equity Put/Call Ratio
+    Reference -> https://www.cboe.com/us/options/market_statistics/daily/        
+    """
+    excel_book = xw.Book(fullname='data/Contrarian_Indicators.xlsx')
+    PCR_sheet = excel_book.sheets['PCR']
+    last_row = int(PCR_sheet.range('A1').end('down').row)
+    last_day = PCR_sheet.range(f'A{last_row}').value
+    
+    add_df = pd.DataFrame(columns=['Date','TOTAL','INDEX','EQUITY']) 
+    sample = pd.read_excel('data/US_Major_Indexes.xlsx', sheet_name="^GSPC") # load 'sample' to get the days the market was open
+    
+    for day in sample[sample['Date'] > pd.Timestamp(last_day)]['Date']: # day: market dates that aren't  written in PCR_sheet
+        data = WEB_SCRAPE(url=f'https://www.cboe.com/us/options/market_statistics/daily/?dt={day.date()}',
+                          css_selector='#daily-market-statistics > div > div > div:nth-child(5) > table')
+        # only three items whose first item is 'TOTAL' or 'INDEX' or 'EQUITY'
+        data_list = list(filter(lambda x: x.split(' ')[0] in ['TOTAL','INDEX','EQUITY'], data.split('\n')))        
+        add_dict = {'Date': day.date()}
+        for d in data_list:
+            add_dict[d.split(' ')[0]] = d.split(' ')[-1]
+            
+        add_df = add_df.append(add_dict, ignore_index=True)
+    
+    # add option data into excel sheet
+    PCR_sheet.range(f'A{last_row+1}').value = add_df.values
+    excel_book.save()
+    print("Added data:")
+    return add_df
+
+    
+def GET_OPTIONS(tickers: list):
+    """
+    Ticker examples:
+    S&P500:     '$SPX'
+    Nasdaq100:  '$IUXX'
+    Dow Jones:  '$DJX'
+    """
+    book = xw.Book(fullname='data/Options.xlsx')
+    day = [datetime.datetime.today().date()]
+    
+    for ticker in tickers:        
+        text = WEB_SCRAPE(url=f'https://www.barchart.com/stocks/quotes/{ticker}',
+                             css_selector='#main-content-column > div > div.barchart-content-block.symbol-fundamentals.bc-cot-table-wrapper > div.block-content')
+        data = text.split('\n')        
+        values = []
+        for v in [data[i] for i in range(1, len(data), 2)]:
+            p = v.find('%')
+            value = v[:p] if p != -1 else v
+            values.append(value)
+        if ticker == tickers[0]:
+            columns = [data[i] for i in range(0, len(data), 2)]
+            df = pd.DataFrame(columns=columns)
+        df.loc[ticker] = values
+
+        sheet = book.sheets[ticker]
+        row = int(sheet.range('A1').end('down').row)+1
+        sheet.range(f'A{row}').value = day + values
+    
+    book.save()
+    print('Added data:')
+    return df
+
+    
+def GET_AAII(load_sheet_delete=True):
+    """
+    Downloaded excel file before running this function will be removed, if its input is still True.
+    Reference -> https://www.aaii.com/sentimentsurvey
+    """
+    load_sheet = pd.read_excel(io=r'C:\Users\runru\Downloads\sentiment.xls', sheet_name='SENTIMENT').iloc[4:, :4]
+    load_sheet.columns = ['Date', 'Bullish', 'Neutral', 'Bearish']
+    load_sheet_lday = list(filter(lambda x: type(x) == datetime.datetime, load_sheet['Date']))[-1]
+    
+    my_sheet = pd.read_excel(io='data/Contrarian_Indicators.xlsx', sheet_name='AAII')
+    my_sheet_lday = my_sheet['Date'].iloc[-1]    
+    
+    while load_sheet_lday > my_sheet_lday:
+        my_sheet_lday += pd.Timedelta(days=7)
+        add_data = load_sheet[load_sheet['Date'] == my_sheet_lday].values
+        book = xw.Book(fullname='data/Contrarian_Indicators.xlsx')
+        sheet = book.sheets['AAII']
+        row = int(sheet.range('A1').end('down').row)+1
+        sheet.range('A'+str(row)).value = add_data[0]
+        sheet.range('E'+str(row)).formula = f'=B{row}-D{row}'
+        sheet.range('F'+str(row)).formula = f'=AVERAGE(B{row-7}:B{row})'
+        sheet.range('G'+str(row)).formula = f'=AVERAGE(D{row-7}:D{row})'
+        book.save()
+    
+    if load_sheet_delete == True:
+        os.remove(r'C:\Users\runru\Downloads\sentiment.xls')
+        
+        
+def GET_NAAIM():
+    book = xw.Book('data/Contrarian_Indicators.xlsx')
+    sheet = book.sheets['NAAIM']
+    last_row = int(sheet.range('A1').end('down').row)
+    sheet_lday = sheet.range(f'A{last_row}').value.date()
+    
+    text = WEB_SCRAPE(url='https://www.naaim.org/programs/naaim-exposure-index/',
+                      css_selector='#surveydata > tbody')
+    data = pd.DataFrame(data=[row.split(' ') for row in text.split('\n')][1:],
+                        columns=sheet.range('A1:H1').value)
+    data['Date'] = [day.date() for day in pd.to_datetime(data['Date'])]
+    
+    add_data = data[data['Date'] > sheet_lday].sort_values(by=['Date'])
+    sheet.range(f'A{last_row+1}').value = add_data.values
+    book.save()
+    print('Added Data:\n', add_data)        
+        
+
+def GET_MARGIN_DEBT():
+    """
+    Reference -> https://www.finra.org/investors/learn-to-invest/advanced-investing/margin-statistics
+    """
+    book = xw.Book('data/Contrarian_Indicators.xlsx')
+    sheet = book.sheets['Margin_Debt']
+    last_row = int(sheet.range('A1').end('down').row)
+    last_date = sheet.range(f'A{last_row}').value.date()
+    
+    text = WEB_SCRAPE(url='https://www.finra.org/investors/learn-to-invest/advanced-investing/margin-statistics',
+                      css_selector='#block-finra-bootstrap-sass-system-main > div > article > div > div > div:nth-child(4) > div > div > div > div > div > table:nth-child(5) > tbody')
+    data = [row.split(' ') for row in text.split('\n')]
+    latest_data = data[-1]
+    print("Latest data:\n", latest_data)
+    
+    if latest_data[0] == last_date.strftime('%b-%y'):
+        print('\nYour excel sheet is the latest version, or the margin debt data is not updated.\n')
+        return
+    
+    new_date = last_date + relativedelta(months=1)
+    sheet.range(f'A{last_row+1}').value = new_date.strftime('%b %Y')
+    sheet.range(f'B{last_row+1}').value = latest_data[1]
+    book.save()
+    
+    
+def WEB_SCRAPE(url: str, css_selector: str):
+    """
+    Extract data and return it as a text format
+    """    
+    driver = webdriver.Chrome(ChromeDriverManager().install(), options=options)
+    driver.implicitly_wait(10)
+    driver.get(url)
+    element = driver.find_element(by=By.CSS_SELECTOR, value=css_selector)
+    text = element.text
+    time.sleep(5)
+    driver.close()
+    return text
