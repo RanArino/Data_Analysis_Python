@@ -20,7 +20,7 @@ options.add_argument('--proxy-server="direct://"');
 options.add_argument('--proxy-bypass-list=*');
 options.add_argument('--start-maximized');
 
-def YAHOO_FINANCE_EXTRACT(file_name:str, tickers:list, daily_change: str, volumes:list, columns:list):
+def get_yahoo_finance_data(file_name:str, tickers:list, daily_change: str, volumes:list, columns:list):
     """
     (str, list, str, list, list) -> edit excel file
     Extract the data from yahoo finance and add them into excel file
@@ -65,7 +65,7 @@ def YAHOO_FINANCE_EXTRACT(file_name:str, tickers:list, daily_change: str, volume
     return df.reset_index().set_index(['Ticker', 'Date']).drop(['index'], axis=1)
 
 
-def SP500_SECTOR():
+def get_sp500_sector():
     sectors = {'CONS_DESC': '^SP500-25', 'CONS_STPL': '^SP500-30', 'ENERGY': '^SP500-1010',
                'FINANCIALS': '^SP500-40', 'HEALTH': '^SP500-35', 'INDUSTRIALS': '^SP500-20',
                'MATERIALS': '^SP500-15', 'REAL_ESTATE': '^SP500-60', 'TECHNOLOGY': '^SP500-45',
@@ -87,7 +87,7 @@ def SP500_SECTOR():
     return df_sector
             
             
-def GET_PCR():
+def get_pcr():
     """
     Extract Total, Index, and Equity Put/Call Ratio
     Reference -> https://www.cboe.com/us/options/market_statistics/daily/        
@@ -101,8 +101,8 @@ def GET_PCR():
     sample = pd.read_excel('data/US_Major_Indexes.xlsx', sheet_name="^GSPC") # load 'sample' to get the days the market was open
     
     for day in sample[sample['Date'] > pd.Timestamp(last_day)]['Date']: # day: market dates that aren't  written in PCR_sheet
-        data = WEB_SCRAPE(url=f'https://www.cboe.com/us/options/market_statistics/daily/?dt={day.date()}',
-                          css_selector='#daily-market-statistics > div > div > div:nth-child(5) > table')
+        data = web_scrape(url=f'https://www.cboe.com/us/options/market_statistics/daily/?dt={str(day.date())}',
+                          css_selector='#daily-market-statistics > div > div:nth-child(2) > table')
         # only three items whose first item is 'TOTAL' or 'INDEX' or 'EQUITY'
         data_list = list(filter(lambda x: x.split(' ')[0] in ['TOTAL','INDEX','EQUITY'], data.split('\n')))        
         add_dict = {'Date': day.date()}
@@ -118,7 +118,7 @@ def GET_PCR():
     return add_df
 
     
-def GET_OPTIONS(tickers: list):
+def get_options(tickers: list):
     """
     Ticker examples:
     S&P500:     '$SPX'
@@ -129,7 +129,7 @@ def GET_OPTIONS(tickers: list):
     day = [datetime.datetime.today().date()]
     
     for ticker in tickers:        
-        text = WEB_SCRAPE(url=f'https://www.barchart.com/stocks/quotes/{ticker}',
+        text = web_scrape(url=f'https://www.barchart.com/stocks/quotes/{ticker}',
                              css_selector='#main-content-column > div > div.barchart-content-block.symbol-fundamentals.bc-cot-table-wrapper > div.block-content')
         data = text.split('\n')        
         values = []
@@ -151,7 +151,7 @@ def GET_OPTIONS(tickers: list):
     return df
 
     
-def GET_AAII(load_sheet_delete=True):
+def get_aaii(load_sheet_delete=True):
     """
     Downloaded excel file before running this function will be removed, if its input is still True.
     Reference -> https://www.aaii.com/sentimentsurvey
@@ -179,13 +179,13 @@ def GET_AAII(load_sheet_delete=True):
         os.remove(r'C:\Users\runru\Downloads\sentiment.xls')
         
         
-def GET_NAAIM():
+def get_naaim():
     book = xw.Book('data/Contrarian_Indicators.xlsx')
     sheet = book.sheets['NAAIM']
     last_row = int(sheet.range('A1').end('down').row)
     sheet_lday = sheet.range(f'A{last_row}').value.date()
     
-    text = WEB_SCRAPE(url='https://www.naaim.org/programs/naaim-exposure-index/',
+    text = web_scrape(url='https://www.naaim.org/programs/naaim-exposure-index/',
                       css_selector='#surveydata > tbody')
     data = pd.DataFrame(data=[row.split(' ') for row in text.split('\n')][1:],
                         columns=sheet.range('A1:H1').value)
@@ -196,8 +196,57 @@ def GET_NAAIM():
     book.save()
     print('Added Data:\n', add_data)        
         
+def get_sp500_per():
+    """
+    Reference:
+    S&P500 PER -> https://www.multpl.com/s-p-500-pe-ratio/table/by-month
+    S&P500 Shiller -> https://www.multpl.com/shiller-pe/table/by-month
+    """
+    # Normal PER
+    N_PER = web_scrape(url='https://www.multpl.com/s-p-500-pe-ratio/table/by-month',
+                       css_selector='#datatable > tbody')
+    data_past1 = list(i.replace(' estimate', '').replace(',', '') for i in N_PER.split('\n')[1:14])
+    data_past1 = [item.split(' ') for item in data_past1]
 
-def GET_MARGIN_DEBT():
+    # Shiller PER
+    S_PER = web_scrape(url='https://www.multpl.com/shiller-pe/table/by-month',
+                       css_selector='#datatable > tbody')
+    data_shiller = list(i.replace(' estimate', '').replace(',', '') for i in S_PER.split('\n')[1:14])
+    
+    # change str to int or float
+    for item, shiller in zip(data_past1, data_shiller):
+        item[0] = time.strptime(item[0], '%b').tm_mon # month
+        item[1:3] = [int(x) for x in item[1:3]] # day and year
+        item[-1] = float(item[-1]) # PER
+        item.append(float(shiller.split(' ')[-1])) # add shiller PER 
+    
+    # create DataFrame
+    df = pd.DataFrame(data_past1, columns=['M', 'D', 'Y', 'N_PER', 'S_PER'])    
+    # add new column 'Date'
+    df.insert(loc=0, column='Date', 
+              value=[datetime.date(y, m, d) for (y,m,d) in zip(df.Y, df.M, df.D)])
+    # sorted by 'Date'
+    df.sort_values('Date', inplace=True, ignore_index=True)
+    # drop unnessary columns
+    df.drop(['M', 'D', 'Y'], axis=1, inplace=True)
+    
+    # read excel file as pd.DataFrame
+    original = pd.read_excel(io='data/Contrarian_Indicators.xlsx',
+                             sheet_name='SP500_PER') 
+    # get location
+    location = original[original['Date'] == df['Date'][0].strftime("%Y-%m-%d")].index
+    
+    # open excel book
+    PER_excel = xw.Book(fullname='data/Contrarian_Indicators.xlsx')
+    PER_sheet = PER_excel.sheets['SP500_PER']
+    # change/add the value
+    PER_sheet.range(f'A{int(location.values)+2}').value = df.values
+    PER_excel.save()
+    
+    print('Past 1 year data:')
+    return df
+        
+def get_margin_debt():
     """
     Reference -> https://www.finra.org/investors/learn-to-invest/advanced-investing/margin-statistics
     """
@@ -206,7 +255,7 @@ def GET_MARGIN_DEBT():
     last_row = int(sheet.range('A1').end('down').row)
     last_date = sheet.range(f'A{last_row}').value.date()
     
-    text = WEB_SCRAPE(url='https://www.finra.org/investors/learn-to-invest/advanced-investing/margin-statistics',
+    text = web_scrape(url='https://www.finra.org/investors/learn-to-invest/advanced-investing/margin-statistics',
                       css_selector='#block-finra-bootstrap-sass-system-main > div > article > div > div > div:nth-child(4) > div > div > div > div > div > table:nth-child(5) > tbody')
     data = [row.split(' ') for row in text.split('\n')]
     latest_data = data[-1]
@@ -222,7 +271,7 @@ def GET_MARGIN_DEBT():
     book.save()
     
     
-def WEB_SCRAPE(url: str, css_selector: str):
+def web_scrape(url: str, css_selector: str):
     """
     Extract data and return it as a text format
     """    
