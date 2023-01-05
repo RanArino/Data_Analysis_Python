@@ -1,5 +1,6 @@
 import numpy as np
 import pandas as pd
+import matplotlib.pyplot as plt
 import xlwings as xw
 import datetime
 from dateutil.relativedelta import relativedelta
@@ -63,6 +64,42 @@ def get_yahoo_finance_data(file_name:str, tickers:list, daily_change: str, volum
     excel_book.save()
     print('Added data:')
     return df.reset_index().set_index(['Ticker', 'Date']).drop(['index'], axis=1)
+
+
+def get_vix_futures(show_table = False, show_graph = False): 
+    """
+    Retrieve the different contracts' VIX futures from the Barchart.com
+    """
+    # Get original data
+    text = web_scrape(url='https://www.barchart.com/futures/quotes/VIY00/futures-prices',
+                  css_selector='#main-content-column > div > div.barchart-content-block.invisible.border-top-0.visible')
+    raw_data = text.split('\n') # split original data as 'new line'
+    columns = raw_data[:10]     # columns are the first 10 items 
+    del raw_data[:11]           # remove unnecessary items
+    data_list = []              # define list for each row data
+    while len(raw_data) != 0:
+        data_list.append(raw_data[:10])
+        del raw_data[:10]        
+    df = pd.DataFrame(data=data_list, columns=columns)
+    
+    # Adding new data (closing value) to the excel file
+    book = xw.Book(fullname='data/Contrarian_Indicators.xlsx')
+    sheet = book.sheets['VIX_Futures']
+    row = int(sheet.range('A1').end('down').row)+1    # get the row for the new data
+    date = [pd.to_datetime(df['Time'].loc[0]).date()] # get the date of the retrieved data
+    values = list(df['Last'].apply(lambda x: x[:-1]).astype('float')) # convert values to float
+    sheet.range(f'A{row}').value = date + values
+    book.save()
+    
+    if show_graph == True:
+        new_df = pd.read_excel('data/Contrarian_Indicators.xlsx', sheet_name='VIX_Futures').T
+        new_df.rename(columns=new_df.iloc[0], inplace=True) # assign date as eacn column name
+        new_df.drop('Date', inplace=True) # drop 'Date' row
+        plt.plot(new_df.iloc[:, -5:]) # showing the latest 10 data
+        plt.legend(list(new_df.columns.astype('str'))[-5:])
+            
+    if show_table == True:
+        return df
 
 
 def get_sp500_sector():
