@@ -107,7 +107,7 @@ def get_sp500_sector():
                'FINANCIALS': '^SP500-40', 'HEALTH': '^SP500-35', 'INDUSTRIALS': '^SP500-20',
                'MATERIALS': '^SP500-15', 'REAL_ESTATE': '^SP500-60', 'TECHNOLOGY': '^SP500-45',
                'TELECOM_SVS': '^SP500-50', 'UTILITIES': '^SP500-55'}
-    book = xw.Book('data/US_Major_Indexes.xlsx')
+    book = xw.Book('data/Stock_Indices.xlsx')
     sheet = book.sheets['S&P500_SECTOR']
     last_row = int(sheet.range('A1').end('down').row)
     last_day = sheet.range(f'A{last_row}').value.date()
@@ -135,7 +135,7 @@ def get_pcr():
     last_day = PCR_sheet.range(f'A{last_row}').value
     
     add_df = pd.DataFrame(columns=['Date','TOTAL','INDEX','EQUITY']) 
-    sample = pd.read_excel('data/US_Major_Indexes.xlsx', sheet_name="^GSPC") # load 'sample' to get the days the market was open
+    sample = pd.read_excel('data/Stock_Indices.xlsx', sheet_name="^GSPC") # load 'sample' to get the days the market was open
     
     for day in sample[sample['Date'] > pd.Timestamp(last_day)]['Date']: # day: market dates that aren't  written in PCR_sheet
         data = web_scrape(url=f'https://www.cboe.com/us/options/market_statistics/daily/?dt={str(day.date())}',
